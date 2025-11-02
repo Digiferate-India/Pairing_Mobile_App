@@ -1,44 +1,77 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
-
-import { NewAppScreen } from '@react-native/new-app-screen';
-import { StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
+import React, { useState, useEffect } from 'react';
 import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+  SafeAreaView,
+  StyleSheet,
+  View,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import PairingScreen from './src/screens/PairingScreen';
+import PlayerScreen from './src/screens/PlayerScreen';
 
-function App() {
-  const isDarkMode = useColorScheme() === 'dark';
+const App = () => {
+  const [screenId, setScreenId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const checkPairingStatus = async () => {
+      const storedScreenId = await AsyncStorage.getItem('screen_id');
+      if (storedScreenId) {
+        setScreenId(storedScreenId);
+      }
+      setIsLoading(false);
+    };
+    checkPairingStatus();
+  }, []);
+
+  const handlePairSuccess = async (id: string) => {
+    try {
+      await AsyncStorage.setItem('screen_id', id);
+      setScreenId(id);
+    } catch (e) {
+      Alert.alert('Error', 'Could not save screen ID.');
+    }
+  };
+
+  const handleExit = async () => {
+    try {
+      await AsyncStorage.removeItem('screen_id');
+      setScreenId(null);
+    } catch (e) {
+      Alert.alert('Error', 'Could not clear screen ID.');
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
 
   return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
-    </SafeAreaProvider>
+    <SafeAreaView style={styles.safeArea}>
+      {screenId ? (
+        <PlayerScreen screenId={screenId} onExit={handleExit} />
+      ) : (
+        <PairingScreen onPairSuccess={handlePairSuccess} />
+      )}
+    </SafeAreaView>
   );
-}
-
-function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
-
-  return (
-    <View style={styles.container}>
-      <NewAppScreen
-        templateFileName="App.tsx"
-        safeAreaInsets={safeAreaInsets}
-      />
-    </View>
-  );
-}
+};
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
   container: {
     flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F5F5F5',
   },
 });
 
