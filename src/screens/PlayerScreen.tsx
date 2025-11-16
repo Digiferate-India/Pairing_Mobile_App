@@ -22,7 +22,8 @@ type MediaItem = {
 type PlaylistItem = {
   id: number;
   duration: number;
-  scheduled_time: string | null; 
+  start_time: string | null; 
+  end_time: string | null;   
   media: MediaItem[]; 
   orientation: string;
 };
@@ -30,7 +31,8 @@ type PlaylistItem = {
 interface PlaylistItemRpcResponse {
   item_id: number;
   duration: number;
-  scheduled_time: string | null;
+  start_time: string | null; 
+  end_time: string | null;   
   file_name: string;
   file_path: string;
   file_type: string;
@@ -42,32 +44,45 @@ type PlayerScreenProps = {
   onExit?: () => void;
 };
 
+// --- Helper function (UPDATED with Bug Fix) ---
+const checkPlayability = (item: PlaylistItem, now: Date): boolean => {
+  const hasNoStartTime = !item.start_time;
+  // ✅ FIX: Use !! to cast the result to a boolean
+  const hasStarted = !!item.start_time && (new Date(item.start_time) <= now); 
+  
+  const hasNoEndTime = !item.end_time;
+  // ✅ FIX: Use !! to cast the result to a boolean
+  const hasNotEnded = !!item.end_time && (new Date(item.end_time) > now); 
+
+  // Playable if:
+  // (It has no start time OR it has already started)
+  // AND
+  // (It has no end time OR it has not ended yet)
+  return (hasNoStartTime || hasStarted) && (hasNoEndTime || hasNotEnded);
+};
+
+
 const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
-  // --- State and Refs ---
+  // --- State and Refs (no change) ---
   const [playlist, setPlaylist] = useState<PlaylistItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true); 
   const [isBuffering, setIsBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
   const [isPlayable, setIsPlayable] = useState(false);
-
   const currentIndexRef = useRef(0);
   const mediaStartTimeRef = useRef(Date.now());
   const timerRef = useRef<number | null>(null); 
 
-  // --- 1. fetchPlaylist & Polling (UPDATED with Network Fix) ---
+  // --- 1. fetchPlaylist & Polling (no change) ---
   useEffect(() => {
     
-    // This function now handles *all* fetching and error logic
     const checkStatusAndPlaylist = async () => {
-      
       if (isLoading) {
         console.log("Initial load...");
       }
       
       try {
-        // 1. Check the screen status
         const { data: status, error: statusError } = await supabase.rpc('get_screen_status', {
           screen_id_to_check: parseInt(screenId, 10)
         });
@@ -75,26 +90,24 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
 
         if (status !== 'paired') {
           console.log('Polling: Status is not "paired". Exiting player...');
-          if (isLoading) setIsLoading(false); // Turn off spinner if we exit
+          if (isLoading) setIsLoading(false);
           if (onExit) onExit();
-          return; // Stop execution
+          return;
         }
 
-        // 2. Status is 'paired', so fetch the playlist
         const { data: playlistData, error: playlistError } = await supabase.rpc('get_playlist_for_screen', {
           screen_id_to_check: parseInt(screenId, 10) 
         });
         if (playlistError) throw playlistError;
 
-        // 3. SUCCESS!
-        if (error) setError(null); // ✅ Clear any previous error
+        if (error) setError(null);
         
-        // Process the playlist
         if (playlistData) {
           const formattedPlaylist = playlistData.map((item: PlaylistItemRpcResponse) => ({
             id: item.item_id,
             duration: item.duration,
-            scheduled_time: item.scheduled_time, 
+            start_time: item.start_time, 
+            end_time: item.end_time,     
             orientation: item.orientation,
             media: [{ 
               id: item.item_id,
@@ -107,17 +120,22 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
           setPlaylist(currentPlaylist => {
             if (JSON.stringify(currentPlaylist) !== JSON.stringify(formattedPlaylist)) {
               console.log('Playlist has changed! Updating state.');
-              const now = new Date();
-              const currentTimeString = now.toTimeString().split(' ')[0];
+              
+              const now = new Date(); 
+              
               let initialIndex = formattedPlaylist.findIndex(
-                (item: PlaylistItem) => !item.scheduled_time || item.scheduled_time <= currentTimeString
+                (item: PlaylistItem) => checkPlayability(item, now)
               );
+
               if (initialIndex === -1) {
+                console.log("No playable items found for initial load.");
                 initialIndex = 0; 
                 setIsPlayable(false);
               } else {
+                console.log("Playable items found.");
                 setIsPlayable(true);
               }
+              
               console.log(`Setting initial index to: ${initialIndex}`);
               currentIndexRef.current = initialIndex;
               mediaStartTimeRef.current = Date.now();
@@ -133,34 +151,29 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
 
       } catch (err: any) {
         console.error("Polling error:", err.message);
-        // ✅ Only update state if error message is new
         if (error !== err.message) { 
           setError(err.message);
         }
       } finally {
         if (isLoading) {
-          setIsLoading(false); // Turn off spinner after first load/fail
+          setIsLoading(false);
         }
       }
     };
 
-    // 1. Call it immediately on load
     checkStatusAndPlaylist();
-    
-    // 2. Set up the interval to poll
     const pollInterval = 4000;
     const intervalId = setInterval(checkStatusAndPlaylist, pollInterval);
 
-    // 3. Cleanup
     return () => {
       console.log('Cleaning up polling interval');
       clearInterval(intervalId);
     };
   
-  }, [screenId, onExit, error, isLoading]); // ✅ 'error' and 'isLoading' are now in the dependency array
+  }, [screenId, onExit, error, isLoading]);
 
 
-  // --- 2. The Scheduler (with Flicker Fix) ---
+  // --- 2. The Scheduler (no change) ---
   useEffect(() => {
     if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -173,22 +186,27 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
 
     timerRef.current = setInterval(() => {
       const now = new Date();
-      const currentTimeString = now.toTimeString().split(' ')[0]; // "HH:mm:ss"
-      const currentTimeHHMM = currentTimeString.substring(0, 5); // "HH:mm"
 
-      // 1. HIGH PRIORITY: Check for a scheduled item that is due
+      // 1. HIGH PRIORITY: Check for a scheduled item that is due to *start*
       const scheduledItemIndex = playlist.findIndex(
-        (item) => item.scheduled_time === currentTimeHHMM
+        (item) => {
+          if (!item.start_time) return false; // Must have a start time
+          const startDate = new Date(item.start_time);
+          // Check if the start time is within the current second
+          return startDate >= now && startDate.getTime() < (now.getTime() + 1000);
+        }
       );
       
       if (scheduledItemIndex !== -1) {
         if (scheduledItemIndex !== currentIndexRef.current) {
-          console.log(`Scheduler: Jumping to scheduled item ${scheduledItemIndex}`);
-          mediaStartTimeRef.current = Date.now();
-          currentIndexRef.current = scheduledItemIndex;
-          setCurrentIndex(scheduledItemIndex);
-          if (!isPlayable) setIsPlayable(true);
-          return;
+          if (checkPlayability(playlist[scheduledItemIndex], now)) {
+            console.log(`Scheduler: Jumping to scheduled item ${scheduledItemIndex}`);
+            mediaStartTimeRef.current = Date.now();
+            currentIndexRef.current = scheduledItemIndex;
+            setCurrentIndex(scheduledItemIndex);
+            if (!isPlayable) setIsPlayable(true);
+            return;
+          }
         }
         
         if (!isPlayable) {
@@ -206,17 +224,36 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         return; 
       } 
 
-      const isItemPlayable = !currentItem.scheduled_time || currentItem.scheduled_time <= currentTimeString;
+      const isItemPlayable = checkPlayability(currentItem, now);
 
       if (!isItemPlayable) {
-        if (isPlayable) setIsPlayable(false);
+        if (isPlayable) setIsPlayable(false); // Set to "Waiting..."
+        
+        let nextPlayableIndex = -1;
+        for (let i = 0; i < playlist.length; i++) { 
+          if (i === currentIndexRef.current) continue; 
+          
+          if (checkPlayability(playlist[i], now)) {
+            nextPlayableIndex = i;
+            break;
+          }
+        }
+
+        if (nextPlayableIndex !== -1) {
+          console.log(`Scheduler: Current item expired. Jumping to next playable item ${nextPlayableIndex}`);
+          mediaStartTimeRef.current = Date.now();
+          currentIndexRef.current = nextPlayableIndex;
+          setCurrentIndex(nextPlayableIndex);
+          setIsPlayable(true);
+        }
+        
         return; 
       }
       
       if (!isPlayable) {
         console.log(`Scheduler: Item ${currentIndexRef.current} just became playable (fallback).`);
         setIsPlayable(true);
-        mediaStartTimeRef.current = Date.now(); // RESET THE TIMER
+        mediaStartTimeRef.current = Date.now(); 
       }
 
       // 3. Check duration of the (now playable) item
@@ -224,36 +261,28 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
       const timeElapsed = Date.now() - mediaStartTimeRef.current;
 
       if (timeElapsed > durationMs) {
-        // Time is up. Find the NEXT playable item.
         console.log(`Scheduler: Item ${currentIndexRef.current} duration ended.`);
         let nextPlayableIndex = -1;
         
         for (let i = 1; i < playlist.length; i++) {
           const testIndex = (currentIndexRef.current + i) % playlist.length;
-          const item = playlist[testIndex];
           
-          if (!item.scheduled_time || item.scheduled_time <= currentTimeString) {
+          if (checkPlayability(playlist[testIndex], now)) {
             nextPlayableIndex = testIndex;
             break; 
           }
         }
         
-        // This is the flicker fix
         if (nextPlayableIndex !== -1) {
-          // We found a *different* playable item
           console.log(`Scheduler: Moving to next item ${nextPlayableIndex}`);
           mediaStartTimeRef.current = Date.now();
           currentIndexRef.current = nextPlayableIndex;
           setCurrentIndex(nextPlayableIndex);
         } else {
-          // We did NOT find a *different* playable item.
-          // Check if the *current* item is still playable (e.g., single item playlist)
           if (isItemPlayable) {
-            // Yes, it's still playable. Just restart it.
             console.log(`Scheduler: Restarting single playable item ${currentIndexRef.current}`);
             mediaStartTimeRef.current = Date.now(); 
           } else {
-            // No, the current item is also not playable
             console.log(`Scheduler: No other playable items found. Waiting...`);
             setIsPlayable(false);
           }
@@ -268,7 +297,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         clearInterval(timerRef.current);
       }
     };
-  }, [playlist, isLoading, isPlayable]); // The dependency array is correct
+  }, [playlist, isLoading, isPlayable]);
 
 
   // --- 3. Orientation Controller (no change) ---
@@ -355,24 +384,16 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
   };
 
 
-  // --- 6. Return logic (UPDATED) ---
+  // --- 6. Return logic (Buttons commented out) ---
   
   if (error) {
     return (
       <>
         <View style={styles.container}>
           <Text style={styles.errorText}>Error: {error}</Text>
-          {/* Show a helpful message during a temporary network drop */}
           <Text style={styles.title}>(Retrying in background...)</Text>
         </View>
-        {/*
-        <TouchableOpacity
-          style={styles.exitButton}
-          onPress={onExit || (() => console.log('Exit button pressed but no onExit handler'))}
-        >
-          <Text style={styles.exitButtonText}>Exit</Text>
-        </TouchableOpacity>
-        */}
+        {/* ... exit button commented ... */}
       </>
     );
   }
@@ -383,14 +404,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         <View style={styles.container}>
           <ActivityIndicator size="large" color="#FFFFFF" />
         </View>
-        {/*
-        <TouchableOpacity
-          style={styles.exitButton}
-          onPress={onExit || (() => console.log('Exit button pressed but no onExit handler'))}
-        >
-          <Text style={styles.exitButtonText}>Exit</Text>
-        </TouchableOpacity>
-        */}
+        {/* ... exit button commented ... */}
       </>
     );
   }
@@ -401,14 +415,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         <View style={styles.container}>
           <Text style={styles.title}>No content assigned.</Text>
         </View>
-        {/*
-        <TouchableOpacity
-          style={styles.exitButton}
-          onPress={onExit || (() => console.log('Exit button pressed but no onExit handler'))}
-        >
-          <Text style={styles.exitButtonText}>Exit</Text>
-        </TouchableOpacity>
-        */}
+        {/* ... exit button commented ... */}
       </>
     );
   }
@@ -419,14 +426,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         <View style={styles.container}>
           <Text style={styles.title}>Waiting for scheduled content...</Text>
         </View>
-        {/*
-        <TouchableOpacity
-          style={styles.exitButton}
-          onPress={onExit || (() => console.log('Exit button pressed but no onExit handler'))}
-        >
-          <Text style={styles.exitButtonText}>Exit</Text>
-        </TouchableOpacity>
-        */}
+        {/* ... exit button commented ... */}
       </>
     );
   }
@@ -438,20 +438,8 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         {renderCurrentMedia()}
       </View>
       
-      {/*
-      <TouchableOpacity style={styles.rotateButton} onPress={handleRotate}>
-        <Text style={styles.rotateButtonText}>⟳</Text>
-      </TouchableOpacity>
-      */}
-
-      {/*
-      <TouchableOpacity
-        style={styles.exitButton}
-        onPress={onExit || (() => console.log('Exit button pressed but no onExit handler'))}
-      >
-        <Text style={styles.exitButtonText}>Exit</Text>
-      </TouchableOpacity>
-      */}
+      {/* ... rotate button commented ... */}
+      {/* ... exit button commented ... */}
     </>
   );
 };
