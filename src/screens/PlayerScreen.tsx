@@ -20,16 +20,16 @@ type MediaItem = {
 
 type PlaylistItem = {
   id: number;
-  duration: number | null; // Nullable duration
+  duration: number | null; 
   // One-time schedule fields
   start_time: string | null; 
   end_time: string | null;   
-  // Recurring schedule fields
+  // ✅ Recurring schedule fields
   schedule_start_date: string | null;
   schedule_end_date: string | null;
   daily_start_time: string | null;
   daily_end_time: string | null;
-  days_of_week: string | null;
+  days_of_week: string | null; // "Mon,Tue,Wed"
   
   media: MediaItem[]; 
   orientation: string;
@@ -40,11 +40,13 @@ interface PlaylistItemRpcResponse {
   duration: number | null;
   start_time: string | null;
   end_time: string | null;
+  // ✅ DB Response fields
   schedule_start_date: string | null;
   schedule_end_date: string | null;
   daily_start_time: string | null;
   daily_end_time: string | null;
   days_of_week: string | null;
+  
   file_name: string;
   file_path: string;
   file_type: string;
@@ -56,47 +58,52 @@ type PlayerScreenProps = {
   onExit?: () => void;
 };
 
-// Helper to check if a specific item is scheduled for "NOW"
+// --- HELPER: The Brains of the Scheduler ---
 const isItemScheduledNow = (item: PlaylistItem, now: Date): boolean => {
-  // 1. Check One-Time Schedule (Specific Date & Time range)
+  
+  // 1. Check Legacy One-Time Schedule (Timestamp)
   if (item.start_time && item.end_time) {
     const start = new Date(item.start_time);
     const end = new Date(item.end_time);
-    if (now >= start && now < end) {
-      return true;
-    }
+    if (now >= start && now < end) return true;
   }
 
   // 2. Check Recurring Schedule
+  // We need all recurring fields to be present to run this check
   if (item.schedule_start_date && item.schedule_end_date && 
       item.daily_start_time && item.daily_end_time && item.days_of_week) {
     
-    // A. Check Date Range
-    // Note: We treat dates as YYYY-MM-DD strings to avoid timezone issues for simple date checks
-    const currentDateString = now.toISOString().split('T')[0];
+    // A. Check Date Range (YYYY-MM-DD)
+    // We treat dates as strings YYYY-MM-DD to avoid timezone confusion
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const currentDateString = `${year}-${month}-${day}`;
+
     if (currentDateString < item.schedule_start_date || currentDateString > item.schedule_end_date) {
-      return false;
+      return false; // Expired or not started yet
     }
 
     // B. Check Day of Week
     const daysMap = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const currentDay = daysMap[now.getDay()];
-    if (!item.days_of_week.includes(currentDay)) {
-      return false;
+    const currentDayName = daysMap[now.getDay()];
+    
+    if (!item.days_of_week.includes(currentDayName)) {
+      return false; // Wrong day of the week
     }
 
-    // C. Check Time Window
-    // Convert everything to minutes for easy comparison
+    // C. Check Time Window (Convert to Minutes for easy comparison)
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
     
-    const [startHour, startMin] = item.daily_start_time.split(':').map(Number);
-    const startMinutes = startHour * 60 + startMin;
+    // Parse DB Time (e.g., "09:30:00")
+    const [startH, startM] = item.daily_start_time.split(':').map(Number);
+    const scheduleStartMinutes = startH * 60 + startM;
 
-    const [endHour, endMin] = item.daily_end_time.split(':').map(Number);
-    const endMinutes = endHour * 60 + endMin;
+    const [endH, endM] = item.daily_end_time.split(':').map(Number);
+    const scheduleEndMinutes = endH * 60 + endM;
 
-    if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
-      return true;
+    if (currentMinutes >= scheduleStartMinutes && currentMinutes < scheduleEndMinutes) {
+      return true; // We are inside the active window!
     }
   }
 
@@ -113,7 +120,6 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
   const [isBuffering, setIsBuffering] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
-  // This key forces the Video component to re-mount when we want to restart it
   const [playbackKey, setPlaybackKey] = useState(0);
 
   const durationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -125,7 +131,6 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
       if (isLoading) console.log("Fetching playlist...");
       
       try {
-        // Check Status
         const { data: status, error: statusError } = await supabase.rpc('get_screen_status', {
           screen_id_to_check: parseInt(screenId, 10)
         });
@@ -135,7 +140,6 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
           return;
         }
 
-        // Fetch Playlist
         const { data: playlistData, error: playlistError } = await supabase.rpc('get_playlist_for_screen', {
           screen_id_to_check: parseInt(screenId, 10) 
         });
@@ -149,11 +153,13 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
             duration: item.duration, 
             start_time: item.start_time,
             end_time: item.end_time,
+            // ✅ Map new fields
             schedule_start_date: item.schedule_start_date,
             schedule_end_date: item.schedule_end_date,
             daily_start_time: item.daily_start_time,
             daily_end_time: item.daily_end_time,
             days_of_week: item.days_of_week,
+            
             orientation: item.orientation,
             media: [{ 
               id: item.item_id,
@@ -183,38 +189,35 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
     };
 
     fetchData();
-    const pollInterval = setInterval(fetchData, 10000); // Poll every 10s
+    const pollInterval = setInterval(fetchData, 10000); 
     return () => clearInterval(pollInterval);
   }, [screenId, onExit, error, isLoading]);
 
 
-  // --- 2. The Scheduler (Determines WHAT to play) ---
+  // --- 2. The Scheduler ---
   useEffect(() => {
     const checkSchedule = () => {
       if (fullPlaylist.length === 0) return;
 
       const now = new Date();
 
-      // Priority A: Find items scheduled for NOW
+      // Priority A: Is this item scheduled for NOW? (One-time OR Recurring)
       const scheduledItems = fullPlaylist.filter(item => isItemScheduledNow(item, now));
 
-      // Priority B: Default items (No schedule constraints at all)
-      // Items with ANY schedule fields set are considered "scheduled items" 
-      // and are excluded from the default loop unless their schedule is active.
+      // Priority B: Default items (Items with NO schedule information at all)
       const defaultItems = fullPlaylist.filter(item => 
         !item.start_time && !item.end_time && 
-        !item.schedule_start_date
+        !item.schedule_start_date // If it has a start date, it is a recurring item, not default
       );
 
       let newQueue: PlaylistItem[] = [];
       
       if (scheduledItems.length > 0) {
-        newQueue = scheduledItems; // Play scheduled content
+        newQueue = scheduledItems; // Priority takes over
       } else {
-        newQueue = defaultItems; // Fallback to default loop
+        newQueue = defaultItems; // Fallback
       }
 
-      // Update active playlist if queue composition changed
       setActivePlaylist(currentQueue => {
         const currentIds = currentQueue.map(i => i.id).join(',');
         const newIds = newQueue.map(i => i.id).join(',');
@@ -222,7 +225,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         if (currentIds !== newIds) {
           console.log(`Switching Mode. New Queue Length: ${newQueue.length}`);
           setCurrentIndex(0); 
-          setPlaybackKey(k => k + 1); // Force refresh
+          setPlaybackKey(k => k + 1); 
           return newQueue;
         }
         return currentQueue;
@@ -230,7 +233,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
     };
 
     checkSchedule(); 
-    scheduleIntervalRef.current = setInterval(checkSchedule, 1000); 
+    scheduleIntervalRef.current = setInterval(checkSchedule, 1000); // Check every second
 
     return () => {
       if (scheduleIntervalRef.current) clearInterval(scheduleIntervalRef.current);
@@ -238,19 +241,16 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
   }, [fullPlaylist]);
 
 
-  // --- 3. Playback Controller (Determines WHEN to advance) ---
-  
+  // --- 3. Playback Controller ---
   const advanceToNext = useCallback(() => {
     setActivePlaylist(currentQueue => {
       if (currentQueue.length === 0) return currentQueue;
-      
-      setPlaybackKey(prevKey => prevKey + 1); // Always force re-render for videos
-      
+      setPlaybackKey(prevKey => prevKey + 1);
       const nextIndex = (currentIndex + 1) % currentQueue.length;
       setCurrentIndex(nextIndex);
       return currentQueue;
     });
-  }, [currentIndex]); // Depend on currentIndex so we increment correctly
+  }, [currentIndex]); 
 
   useEffect(() => {
     if (durationTimerRef.current) {
@@ -269,18 +269,14 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
     let timeToStay = 0;
 
     if (currentItem.duration) {
-      // CASE 1: Explicit Duration Set (Applies to Image AND Video)
       timeToStay = currentItem.duration * 1000; 
     } else {
-      // CASE 2: No Duration Set (Auto)
       if (!isVideo) {
-        timeToStay = 3000; // Default Image: 3 seconds
+        timeToStay = 3000; 
       } else {
-        timeToStay = 0; // Default Video: Wait for onEnd
+        timeToStay = 0; 
       }
     }
-
-    console.log(`Item ${currentIndex}: ${isVideo ? 'Video' : 'Image'} (${timeToStay > 0 ? timeToStay + 'ms' : 'Full Length'})`);
 
     if (timeToStay > 0) {
       durationTimerRef.current = setTimeout(() => {
@@ -311,15 +307,10 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
 
 
   // --- 5. Render ---
-
   const renderCurrentMedia = () => {
     const currentItem = activePlaylist[currentIndex];
-    
     if (!currentItem) return null;
-
     const currentMedia = currentItem.media[0];
-    
-    // Unique key ensures component remounts on every loop/change
     const uniqueKey = `${currentMedia.id}-${playbackKey}`;
 
     if (currentMedia.file_type.includes('image')) {
@@ -334,10 +325,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
     }
 
     if (currentMedia.file_type.includes('video')) {
-      // Loop internally ONLY if a custom duration is set (forcing a cut-off)
-      // Otherwise (Auto mode), play once then trigger onEnd to advance
       const shouldLoopInternally = !!currentItem.duration;
-
       return (
         <>
           <Video
@@ -348,7 +336,6 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
             muted={false}
             repeat={shouldLoopInternally} 
             onEnd={() => {
-              // Only advance if we are in "Auto" mode (no duration set)
               if (!currentItem.duration) {
                 console.log("Video finished. Advancing...");
                 advanceToNext();
@@ -366,11 +353,9 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         </>
       );
     }
-
     return <Text style={styles.title}>Unsupported media</Text>;
   };
 
-  // --- Error / Loading States ---
   if (error) {
     return (
       <View style={styles.container}>
@@ -394,7 +379,7 @@ const PlayerScreen = ({ screenId, onExit }: PlayerScreenProps) => {
         <Text style={styles.title}>Waiting for scheduled content...</Text>
         <Text style={styles.waitingText}>
           {fullPlaylist.length > 0 
-            ? "Content is assigned but not currently scheduled to play." 
+            ? "Content is assigned but the schedule is not active right now." 
             : "No content assigned to this screen."}
         </Text>
       </View>
